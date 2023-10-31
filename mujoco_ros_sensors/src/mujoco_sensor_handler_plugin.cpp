@@ -67,6 +67,18 @@ bool MujocoRosSensorsPlugin::load(MujocoSim::mjModelPtr model, MujocoSim::mjData
 		ROS_WARN_NAMED("sensors", "Train mode is active, ground truth topics will be available!");
 	}
 
+	auto robot_namespace_ = node_handle_->getNamespace();
+
+	ROS_ASSERT(rosparam_config_.getType() == XmlRpc::XmlRpcValue::TypeStruct);
+	// Check rosparam sanity
+	if (rosparam_config_.hasMember("negate_force_torque")) {
+		if (rosparam_config_["negate_force_torque"].getType() != XmlRpc::XmlRpcValue::TypeBoolean) {
+			ROS_ERROR_NAMED("mujoco_ros_control", "The 'negate_force_torque' param for MujocoRosSensorsPlugin must define a boolean if given");
+			return false;
+		}
+		force_torque_coeff_ = (bool)rosparam_config_["negate_force_torque"] ? -1.0 : 1.0;
+	}
+
 	noise_dist = std::normal_distribution<double>(0.0, 1.0);
 	initSensors(model, data);
 	ROS_INFO_NAMED("sensors", "All sensors initialized");
@@ -158,76 +170,130 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 		config = sensor_map_[sensor_name];
 
 		switch (type) {
-			{
-				case mjSENS_FRAMELINVEL:
-				case mjSENS_FRAMELINACC:
-				case mjSENS_FRAMEANGACC:
-				case mjSENS_SUBTREECOM:
-				case mjSENS_SUBTREELINVEL:
-				case mjSENS_SUBTREEANGMOM:
-				case mjSENS_ACCELEROMETER:
-				case mjSENS_VELOCIMETER:
-				case mjSENS_GYRO:
-				case mjSENS_FORCE:
-				case mjSENS_TORQUE:
-				case mjSENS_MAGNETOMETER:
-				case mjSENS_BALLANGVEL:
-				case mjSENS_FRAMEXAXIS:
-				case mjSENS_FRAMEYAXIS:
-				case mjSENS_FRAMEZAXIS:
-					geometry_msgs::Vector3Stamped msg;
-					msg.header.frame_id = config->frame_id;
-					msg.header.stamp    = ros::Time::now();
+			case mjSENS_FORCE:
+			case mjSENS_TORQUE: {
+				geometry_msgs::Vector3Stamped msg;
+				msg.header.frame_id = config->frame_id;
+				msg.header.stamp    = ros::Time::now();
 
-					// No noise configured
-					if (config->is_set == 0) {
+				// No noise configured
+				if (config->is_set == 0) {
+					msg.vector.x = force_torque_coeff_ * (float)(data->sensordata[adr] / cutoff);
+					msg.vector.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] / cutoff);
+					msg.vector.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] / cutoff);
+
+					config->value_pub.publish(msg);
+
+					if (!MujocoSim::detail::settings_.eval_mode) {
+						config->gt_pub.publish(msg);
+					}
+				} else { // Noise at least in one dim
+					if (config->is_set & 0x01) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						noise = 0;
+					}
+					msg.vector.x = force_torque_coeff_ * (float)(data->sensordata[adr] + noise / cutoff);
+
+					if (config->is_set & 0x02) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						noise = 0;
+					}
+					msg.vector.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] + noise / cutoff);
+
+					if (config->is_set & 0x04) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+					} else {
+						noise = 0;
+					}
+					msg.vector.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] + noise / cutoff);
+
+					config->value_pub.publish(msg);
+
+					if (!MujocoSim::detail::settings_.eval_mode) {
+						msg.vector.x = force_torque_coeff_ * (float)(data->sensordata[adr] / cutoff);
+						msg.vector.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] / cutoff);
+						msg.vector.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] / cutoff);
+
+						config->gt_pub.publish(msg);
+					}
+				}
+				break;
+			}
+			case mjSENS_FRAMELINVEL:
+			case mjSENS_FRAMELINACC:
+			case mjSENS_FRAMEANGVEL:
+			case mjSENS_FRAMEANGACC:
+			case mjSENS_SUBTREECOM:
+			case mjSENS_SUBTREELINVEL:
+			case mjSENS_SUBTREEANGMOM:
+			case mjSENS_ACCELEROMETER:
+			case mjSENS_VELOCIMETER:
+			case mjSENS_GYRO:
+			case mjSENS_MAGNETOMETER:
+			case mjSENS_BALLANGVEL:
+			case mjSENS_FRAMEXAXIS:
+			case mjSENS_FRAMEYAXIS:
+			case mjSENS_FRAMEZAXIS: {
+				geometry_msgs::Vector3Stamped msg;
+				msg.header.frame_id = config->frame_id;
+				msg.header.stamp    = ros::Time::now();
+
+				// No noise configured
+				if (config->is_set == 0) {
+					msg.vector.x = (float)(data->sensordata[adr] / cutoff);
+					msg.vector.y = (float)(data->sensordata[adr + 1] / cutoff);
+					msg.vector.z = (float)(data->sensordata[adr + 2] / cutoff);
+
+					config->value_pub.publish(msg);
+
+					if (!MujocoSim::detail::settings_.eval_mode) {
+						config->gt_pub.publish(msg);
+					}
+				} else { // Noise at least in one dim
+					if (config->is_set & 0x01) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						noise = 0;
+					}
+					msg.vector.x = (float)(data->sensordata[adr] + noise / cutoff);
+
+					if (config->is_set & 0x02) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						noise = 0;
+					}
+					msg.vector.y = (float)(data->sensordata[adr + 1] + noise / cutoff);
+
+					if (config->is_set & 0x04) {
+						// shift and scale standard normal to desired distribution
+						noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+					} else {
+						noise = 0;
+					}
+					msg.vector.z = (float)(data->sensordata[adr + 2] + noise / cutoff);
+
+					config->value_pub.publish(msg);
+
+					if (!MujocoSim::detail::settings_.eval_mode) {
 						msg.vector.x = (float)(data->sensordata[adr] / cutoff);
 						msg.vector.y = (float)(data->sensordata[adr + 1] / cutoff);
 						msg.vector.z = (float)(data->sensordata[adr + 2] / cutoff);
 
-						config->value_pub.publish(msg);
-
-						if (!MujocoSim::detail::settings_.eval_mode) {
-							config->gt_pub.publish(msg);
-						}
-					} else { // Noise at least in one dim
-						if (config->is_set & 0x01) {
-							// shift and scale standard normal to desired distribution
-							noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-							noise_idx += 1;
-						} else {
-							noise = 0;
-						}
-						msg.vector.x = (float)(data->sensordata[adr] + noise / cutoff);
-
-						if (config->is_set & 0x02) {
-							// shift and scale standard normal to desired distribution
-							noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-							noise_idx += 1;
-						} else {
-							noise = 0;
-						}
-						msg.vector.y = (float)(data->sensordata[adr + 1] + noise / cutoff);
-
-						if (config->is_set & 0x04) {
-							// shift and scale standard normal to desired distribution
-							noise = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-						} else {
-							noise = 0;
-						}
-						msg.vector.z = (float)(data->sensordata[adr + 2] + noise / cutoff);
-
-						config->value_pub.publish(msg);
-
-						if (!MujocoSim::detail::settings_.eval_mode) {
-							msg.vector.x = (float)(data->sensordata[adr] / cutoff);
-							msg.vector.y = (float)(data->sensordata[adr + 1] / cutoff);
-							msg.vector.z = (float)(data->sensordata[adr + 2] / cutoff);
-
-							config->gt_pub.publish(msg);
-						}
+						config->gt_pub.publish(msg);
 					}
-					break;
+				}
+				break;
 			}
 
 			case mjSENS_FRAMEPOS: {
@@ -286,103 +352,103 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 				break;
 			}
 
-				{
-					case mjSENS_TOUCH:
-					case mjSENS_RANGEFINDER:
-					case mjSENS_JOINTPOS:
-					case mjSENS_JOINTVEL:
-					case mjSENS_TENDONPOS:
-					case mjSENS_TENDONVEL:
-					case mjSENS_ACTUATORPOS:
-					case mjSENS_ACTUATORVEL:
-					case mjSENS_ACTUATORFRC:
-					case mjSENS_JOINTLIMITPOS:
-					case mjSENS_JOINTLIMITVEL:
-					case mjSENS_JOINTLIMITFRC:
-					case mjSENS_TENDONLIMITPOS:
-					case mjSENS_TENDONLIMITVEL:
-					case mjSENS_TENDONLIMITFRC:
-						mujoco_ros_msgs::ScalarStamped msg;
-						msg.header.frame_id = config->frame_id;
-						msg.header.stamp    = ros::Time::now();
+			case mjSENS_TOUCH:
+			case mjSENS_RANGEFINDER:
+			case mjSENS_JOINTPOS:
+			case mjSENS_JOINTVEL:
+			case mjSENS_TENDONPOS:
+			case mjSENS_TENDONVEL:
+			case mjSENS_ACTUATORPOS:
+			case mjSENS_ACTUATORVEL:
+			case mjSENS_ACTUATORFRC:
+			case mjSENS_JOINTLIMITPOS:
+			case mjSENS_JOINTLIMITVEL:
+			case mjSENS_JOINTLIMITFRC:
+			case mjSENS_TENDONLIMITPOS:
+			case mjSENS_TENDONLIMITVEL:
+			case mjSENS_TENDONLIMITFRC:
+			case mjSENS_CLOCK: {
+				mujoco_ros_msgs::ScalarStamped msg;
+				msg.header.frame_id = config->frame_id;
+				msg.header.stamp    = ros::Time::now();
 
-						// No noise configured
-						if (config->is_set == 0) {
-							msg.value = (float)(data->sensordata[adr] / cutoff);
+				// No noise configured
+				if (config->is_set == 0) {
+					msg.value = (float)(data->sensordata[adr] / cutoff);
 
-							config->value_pub.publish(msg);
-
-							if (!MujocoSim::detail::settings_.eval_mode) {
-								config->gt_pub.publish(msg);
-							}
-						} else { // Noise set
-							// shift and scale standard normal to desired distribution
-							noise     = noise_dist(rand_generator) * config->sigma[0] + config->mean[0];
-							msg.value = (float)(data->sensordata[adr] + noise / cutoff);
-
-							config->value_pub.publish(msg);
-
-							if (!MujocoSim::detail::settings_.eval_mode) {
-								msg.value = (float)(data->sensordata[adr] / cutoff);
-
-								config->gt_pub.publish(msg);
-							}
-						}
-						break;
-				}
-
-			case mjSENS_BALLQUAT: {
-				case mjSENS_FRAMEQUAT:
-					geometry_msgs::QuaternionStamped msg;
-					tf2::Quaternion q_orig, q_rot;
-					msg.header.frame_id = config->frame_id;
-					msg.header.stamp    = ros::Time::now();
-
-					msg.quaternion.w = (float)(data->sensordata[adr] / cutoff);
-					msg.quaternion.x = (float)(data->sensordata[adr + 1] / cutoff);
-					msg.quaternion.y = (float)(data->sensordata[adr + 2] / cutoff);
-					msg.quaternion.z = (float)(data->sensordata[adr + 3] / cutoff);
+					config->value_pub.publish(msg);
 
 					if (!MujocoSim::detail::settings_.eval_mode) {
 						config->gt_pub.publish(msg);
 					}
+				} else { // Noise set
+					// shift and scale standard normal to desired distribution
+					noise     = noise_dist(rand_generator) * config->sigma[0] + config->mean[0];
+					msg.value = (float)(data->sensordata[adr] + noise / cutoff);
 
-					if (config->is_set == 0) {
-						config->value_pub.publish(msg);
-					} else {
-						tf2::fromMsg(msg.quaternion, q_orig);
-						q_orig.normalize();
+					config->value_pub.publish(msg);
 
-						double r, p, y;
+					if (!MujocoSim::detail::settings_.eval_mode) {
+						msg.value = (float)(data->sensordata[adr] / cutoff);
 
-						if (config->is_set & 0x01) {
-							// shift and scale standard normal to desired distribution
-							r = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-							noise_idx += 1;
-						} else {
-							r = 0;
-						}
-						if (config->is_set & 0x02) {
-							// shift and scale standard normal to desired distribution
-							p = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-							noise_idx += 1;
-						} else {
-							p = 0;
-						}
-						if (config->is_set & 0x04) {
-							// shift and scale standard normal to desired distribution
-							y = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
-						} else {
-							y = 0;
-						}
-
-						q_rot.setRPY(r, p, y);
-						q_rot.normalize();
-
-						msg.quaternion = tf2::toMsg((q_rot * q_orig).normalize());
-						config->value_pub.publish(msg);
+						config->gt_pub.publish(msg);
 					}
-					break;
+				}
+				break;
+			}
+
+			case mjSENS_BALLQUAT:
+			case mjSENS_FRAMEQUAT: {
+				geometry_msgs::QuaternionStamped msg;
+				tf2::Quaternion q_orig, q_rot;
+				msg.header.frame_id = config->frame_id;
+				msg.header.stamp    = ros::Time::now();
+
+				msg.quaternion.w = (float)(data->sensordata[adr] / cutoff);
+				msg.quaternion.x = (float)(data->sensordata[adr + 1] / cutoff);
+				msg.quaternion.y = (float)(data->sensordata[adr + 2] / cutoff);
+				msg.quaternion.z = (float)(data->sensordata[adr + 3] / cutoff);
+
+				if (!MujocoSim::detail::settings_.eval_mode) {
+					config->gt_pub.publish(msg);
+				}
+
+				if (config->is_set == 0) {
+					config->value_pub.publish(msg);
+				} else {
+					tf2::fromMsg(msg.quaternion, q_orig);
+					q_orig.normalize();
+
+					double r, p, y;
+
+					if (config->is_set & 0x01) {
+						// shift and scale standard normal to desired distribution
+						r = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						r = 0;
+					}
+					if (config->is_set & 0x02) {
+						// shift and scale standard normal to desired distribution
+						p = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+						noise_idx += 1;
+					} else {
+						p = 0;
+					}
+					if (config->is_set & 0x04) {
+						// shift and scale standard normal to desired distribution
+						y = noise_dist(rand_generator) * config->sigma[noise_idx] + config->mean[noise_idx];
+					} else {
+						y = 0;
+					}
+
+					q_rot.setRPY(r, p, y);
+					q_rot.normalize();
+
+					msg.quaternion = tf2::toMsg((q_rot * q_orig).normalize());
+					config->value_pub.publish(msg);
+				}
+				break;
 			}
 
 			default:
@@ -411,9 +477,9 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 
 		// No noise configured
 		if (force_sensor_config->is_set == 0) {
-			msg.wrench.force.x = (float)(data->sensordata[adr] / cutoff);
-			msg.wrench.force.y = (float)(data->sensordata[adr + 1] / cutoff);
-			msg.wrench.force.z = (float)(data->sensordata[adr + 2] / cutoff);
+			msg.wrench.force.x = force_torque_coeff_ * (float)(data->sensordata[adr] / cutoff);
+			msg.wrench.force.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] / cutoff);
+			msg.wrench.force.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] / cutoff);
 		} else { // Noise at least in one dim
 			if (force_sensor_config->is_set & 0x01) {
 				// shift and scale standard normal to desired distribution
@@ -423,7 +489,7 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.force.x = (float)(data->sensordata[adr] + noise / cutoff);
+			msg.wrench.force.x = force_torque_coeff_ * (float)(data->sensordata[adr] + noise / cutoff);
 
 			if (force_sensor_config->is_set & 0x02) {
 				// shift and scale standard normal to desired distribution
@@ -433,7 +499,7 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.force.y = (float)(data->sensordata[adr + 1] + noise / cutoff);
+			msg.wrench.force.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] + noise / cutoff);
 
 			if (force_sensor_config->is_set & 0x04) {
 				// shift and scale standard normal to desired distribution
@@ -442,7 +508,7 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.force.z = (float)(data->sensordata[adr + 2] + noise / cutoff);
+			msg.wrench.force.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] + noise / cutoff);
 		}
 
 		id        = wrench_sensor_config->torque_sensor_id;
@@ -453,9 +519,9 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 
 		// No noise configured
 		if (torque_sensor_config->is_set == 0) {
-			msg.wrench.torque.x = (float)(data->sensordata[adr] / cutoff);
-			msg.wrench.torque.y = (float)(data->sensordata[adr + 1] / cutoff);
-			msg.wrench.torque.z = (float)(data->sensordata[adr + 2] / cutoff);
+			msg.wrench.torque.x = force_torque_coeff_ * (float)(data->sensordata[adr] / cutoff);
+			msg.wrench.torque.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] / cutoff);
+			msg.wrench.torque.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] / cutoff);
 		} else { // Noise at least in one dim
 			if (torque_sensor_config->is_set & 0x01) {
 				// shift and scale standard normal to desired distribution
@@ -465,7 +531,7 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.torque.x = (float)(data->sensordata[adr] + noise / cutoff);
+			msg.wrench.torque.x = force_torque_coeff_ * (float)(data->sensordata[adr] + noise / cutoff);
 
 			if (torque_sensor_config->is_set & 0x02) {
 				// shift and scale standard normal to desired distribution
@@ -475,7 +541,7 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.torque.y = (float)(data->sensordata[adr + 1] + noise / cutoff);
+			msg.wrench.torque.y = force_torque_coeff_ * (float)(data->sensordata[adr + 1] + noise / cutoff);
 
 			if (torque_sensor_config->is_set & 0x04) {
 				// shift and scale standard normal to desired distribution
@@ -484,12 +550,12 @@ void MujocoRosSensorsPlugin::lastStageCallback(MujocoSim::mjModelPtr model, Mujo
 			} else {
 				noise = 0;
 			}
-			msg.wrench.torque.z = (float)(data->sensordata[adr + 2] + noise / cutoff);
+			msg.wrench.torque.z = force_torque_coeff_ * (float)(data->sensordata[adr + 2] + noise / cutoff);
 		}
 
 		wrench_sensor_config->value_pub.publish(msg);
 
-		if (!env_ptr_->settings_.eval_mode) {
+		if (!MujocoSim::detail::settings_.eval_mode) {
 			wrench_sensor_config->gt_pub.publish(msg);
 		}
 	}
@@ -500,11 +566,7 @@ void MujocoRosSensorsPlugin::initSensors(MujocoSim::mjModelPtr model, MujocoSim:
 	std::string sensor_name, site, frame_id;
 	for (int n = 0; n < model->nsensor; n++) {
 		int adr       = model->sensor_adr[n];
-		int site_id   = model->sensor_objid[n];
-		int parent_id = model->site_bodyid[site_id];
 		int type      = model->sensor_type[n];
-
-		site = mj_id2name(model.get(), model->sensor_objtype[n], site_id);
 
 		if (model->names[model->name_sensoradr[n]]) {
 			sensor_name = mj_id2name(model.get(), mjOBJ_SENSOR, n);
@@ -518,6 +580,22 @@ void MujocoRosSensorsPlugin::initSensors(MujocoSim::mjModelPtr model, MujocoSim:
 		bool global_frame = false;
 		frame_id          = "world";
 		SensorConfigPtr config;
+
+		if (type == mjSENS_CLOCK) {
+			config.reset(new SensorConfig(frame_id));
+			config->registerPub(node_handle_->advertise<mujoco_ros_msgs::ScalarStamped>(sensor_name, 1, true));
+			if (!MujocoSim::detail::settings_.eval_mode) {
+				config->registerGTPub(
+					node_handle_->advertise<mujoco_ros_msgs::ScalarStamped>(sensor_name + "_GT", 1, true));
+			}
+			sensor_map_[sensor_name] = config;
+			continue;
+		}
+
+		int site_id   = model->sensor_objid[n];
+		int parent_id = model->site_bodyid[site_id];
+		site = mj_id2name(model.get(), model->sensor_objtype[n], site_id);
+	
 		switch (type) {
 			{
 				case mjSENS_FRAMEXAXIS:
@@ -525,6 +603,7 @@ void MujocoRosSensorsPlugin::initSensors(MujocoSim::mjModelPtr model, MujocoSim:
 				case mjSENS_FRAMEZAXIS:
 				case mjSENS_FRAMELINVEL:
 				case mjSENS_FRAMELINACC:
+				case mjSENS_FRAMEANGVEL:
 				case mjSENS_FRAMEANGACC:
 					int refid = model->sensor_refid[n];
 					if (refid != -1) {
@@ -570,14 +649,14 @@ void MujocoRosSensorsPlugin::initSensors(MujocoSim::mjModelPtr model, MujocoSim:
 							}
 							frame_id = mj_id2name(model.get(), reftype, refid);
 							ROS_DEBUG_STREAM_NAMED("sensors", "Sensor has relative frame with id "
-							                                      << refid << " and type " << reftype << " and ref_frame "
-							                                      << frame_id);
+																	<< refid << " and type " << reftype << " and ref_frame "
+																	<< frame_id);
 						}
 						config.reset(new SensorConfig(frame_id));
 						config->registerPub(node_handle_->advertise<geometry_msgs::PointStamped>(sensor_name, 1, true));
 						if (!MujocoSim::detail::settings_.eval_mode) {
 							config->registerGTPub(
-							    node_handle_->advertise<geometry_msgs::PointStamped>(sensor_name + "_GT", 1, true));
+								node_handle_->advertise<geometry_msgs::PointStamped>(sensor_name + "_GT", 1, true));
 						}
 						sensor_map_[sensor_name] = config;
 						global_frame             = true;
@@ -733,10 +812,10 @@ void MujocoRosSensorsPlugin::initSensors(MujocoSim::mjModelPtr model, MujocoSim:
 				continue;
 			}
 
-			config->registerPub(sensors_nh_->advertise<geometry_msgs::WrenchStamped>(wrench_sensor_name, 1, true));
-			if (!env_ptr_->settings_.eval_mode) {
+			config->registerPub(node_handle_->advertise<geometry_msgs::WrenchStamped>(wrench_sensor_name, 1, true));
+			if (!MujocoSim::detail::settings_.eval_mode) {
 				config->registerGTPub(
-				    sensors_nh_->advertise<geometry_msgs::WrenchStamped>(wrench_sensor_name + "_GT", 1, true));
+				    node_handle_->advertise<geometry_msgs::WrenchStamped>(wrench_sensor_name + "_GT", 1, true));
 			}
 
 			wrench_sensor_names_.push_back(wrench_sensor_name);

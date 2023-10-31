@@ -127,6 +127,8 @@ private:
 	std::mt19937 rand_generator = std::mt19937(std::random_device{}());
 	std::normal_distribution<double> noise_dist;
 
+	float force_torque_coeff_{1.0};
+
 	std::map<std::string, SensorConfigPtr> sensor_map_;
 
 	std::vector<std::string> wrench_sensor_names_;
